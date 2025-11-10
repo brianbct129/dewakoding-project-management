@@ -4,16 +4,21 @@
     "type": "project",
     "description": "The skeleton application for the Laravel framework.",
     "keywords": ["laravel", "framework"],
-    "license": "MIT",
+    "license": "GPL-3.0-or-later",
     "require": {
         "php": "^8.2",
-        "bezhansalleh/filament-shield": "^3.3",
-        "filament/filament": "^3.2",
+        "bezhansalleh/filament-shield": "^4.0",
+        "filament/filament": "^4.0",
         "laravel/framework": "^12.0",
-        "laravel/tinker": "^2.10.1"
+        "laravel/octane": "^2.9",
+        "laravel/socialite": "^5.23",
+        "laravel/tinker": "^2.10.1",
+        "maatwebsite/excel": "^3.1",
+        "solution-forest/tab-layout-plugin": "^3.2.3"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
+        "filament/upgrade": "^4.0",
         "laravel/pail": "^1.2.2",
         "laravel/pint": "^1.13",
         "laravel/sail": "^1.41",
@@ -54,6 +59,10 @@
         "dev": [
             "Composer\\Config::disableProcessTimeout",
             "npx concurrently -c \"#93c5fd,#c4b5fd,#fb7185,#fdba74\" \"php artisan serve\" \"php artisan queue:listen --tries=1\" \"php artisan pail --timeout=0\" \"npm run dev\" --names=server,queue,logs,vite"
+        ],
+        "octane-dev": [
+            "Composer\\Config::disableProcessTimeout",
+            "php artisan octane:start --server=frankenphp --host=0.0.0.0 --port=8000 --watch"
         ]
     },
     "extra": {

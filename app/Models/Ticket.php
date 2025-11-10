@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
@@ -15,15 +16,18 @@ class Ticket extends Model
     protected $fillable = [
         'project_id',
         'ticket_status_id',
+        'priority_id',
         'name',
         'description',
-        'user_id',
+        'start_date',
         'due_date',
         'uuid',
         'epic_id',
+        'created_by',
     ];
 
     protected $casts = [
+        'start_date' => 'date',
         'due_date' => 'date',
     ];
 
@@ -36,6 +40,11 @@ class Ticket extends Model
                 $randomString = Str::upper(Str::random(6));
 
                 $ticket->uuid = "{$prefix}-{$randomString}";
+            }
+
+            // Set created_by jika belum di-set dan ada user yang login
+            if (empty($ticket->created_by) && auth()->id()) {
+                $ticket->created_by = auth()->id();
             }
         });
 
@@ -60,9 +69,14 @@ class Ticket extends Model
         return $this->belongsTo(TicketStatus::class, 'ticket_status_id');
     }
 
-    public function assignee(): BelongsTo
+    public function assignees(): BelongsToMany
     {
-        return $this->belongsTo(User::class, 'user_id');
+        return $this->belongsToMany(User::class, 'ticket_users');
+    }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
     public function histories(): HasMany
@@ -73,5 +87,35 @@ class Ticket extends Model
     public function comments(): HasMany
     {
         return $this->hasMany(TicketComment::class)->orderBy('created_at', 'asc');
+    }
+
+    public function epic(): BelongsTo
+    {
+        return $this->belongsTo(Epic::class);
+    }
+
+    public function priority(): BelongsTo
+    {
+        return $this->belongsTo(TicketPriority::class, 'priority_id');
+    }
+
+    public function assignUser(User $user): void
+    {
+        $this->assignees()->syncWithoutDetaching($user->id);
+    }
+
+    public function unassignUser(User $user): void
+    {
+        $this->assignees()->detach($user->id);
+    }
+
+    public function assignUsers(array $userIds): void
+    {
+        $this->assignees()->sync($userIds);
+    }
+
+    public function isAssignedTo(User $user): bool
+    {
+        return $this->assignees()->where('user_id', $user->id)->exists();
     }
 }

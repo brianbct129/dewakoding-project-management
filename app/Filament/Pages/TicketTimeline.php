@@ -2,229 +2,224 @@
 
 namespace App\Filament\Pages;
 
+use Exception;
+use Log;
 use App\Models\Project;
 use App\Models\Ticket;
 use Auth;
 use Carbon\Carbon;
 use Filament\Pages\Page;
+use Filament\Notifications\Notification;
 use Illuminate\Support\Collection;
+use Filament\Forms\Concerns\InteractsWithForms;
+use Filament\Forms\Contracts\HasForms;
 
-class TicketTimeline extends Page
+class TicketTimeline extends Page implements HasForms
 {
-    protected static ?string $navigationIcon = 'heroicon-o-calendar';
+    use InteractsWithForms;
 
-    protected static ?string $navigationLabel = 'Timeline';
-
+    protected static string | \BackedEnum | null $navigationIcon = 'heroicon-o-calendar';
+    protected static ?string $navigationLabel = 'Ticket Timeline';
     protected static ?string $title = 'Ticket Timeline';
+    protected static ?int $navigationSort = 6;
+    protected string $view = 'filament.pages.ticket-timeline';
+    protected static string | \UnitEnum | null $navigationGroup = 'Project Management';
+    protected static ?string $slug = 'ticket-timeline/{project_id?}';
 
-    protected static ?int $navigationSort = 2;
-
-    protected static string $view = 'filament.pages.ticket-timeline';
-
-    protected static ?string $navigationGroup = 'Project Visualization';
-
-    public ?string $projectId = null;
-
-    public Collection $projects;
-
-    public function mount(): void
+    public function getSubheading(): ?string
     {
-        $user = Auth::user();
+        return 'View project tickets in Gantt chart timeline';
+    }
+    public ?string $projectId = null;
+    public Collection $projects;
+    public ?Project $selectedProject = null;
 
-        if ($user->hasRole('super_admin')) {
-            $this->projects = Project::all();
-        } else {
-            $this->projects = $user->projects;
+    protected $listeners = [
+        'refreshData' => '$refresh'
+    ];
+
+    public function mount($project_id = null): void
+    {
+        try {
+            $user = Auth::user();
+
+            if ($user->hasRole('super_admin')) {
+                $this->projects = Project::all();
+            } else {
+                $this->projects = $user->projects ?? collect();
+            }
+
+            if ($project_id && $this->projects->contains('id', $project_id)) {
+                $this->projectId = (string) $project_id;
+                $this->selectedProject = Project::find($project_id);
+            }
+        } catch (Exception $e) {
+            Log::error('Error in TicketTimeline mount: ' . $e->getMessage());
+            
+            Notification::make()
+                ->title('Error loading page')
+                ->danger()
+                ->send();
         }
+    }
 
-        if ($this->projects->isNotEmpty() && ! $this->projectId) {
-            $this->projectId = $this->projects->first()->id;
+    public function updatedProjectId($value): void
+    {
+        if ($value) {
+            $this->selectProject($value);
+            // Dispatch event untuk refresh gantt chart
+            $this->dispatch('refreshGanttChart');
+        } else {
+            $this->selectedProject = null;
+            $this->projectId = null;
+
+            // Use wire:navigate for SPA-like navigation
+            $url = static::getUrl();
+            $this->js("Livewire.navigate('{$url}')");
+        }
+    }
+
+    public function selectProject($projectId): void
+    {
+        $this->projectId = (string) $projectId;
+        $this->selectedProject = Project::find($projectId);
+
+        if ($this->selectedProject && $this->projects->contains('id', $projectId)) {
+            // Use wire:navigate for SPA-like navigation
+            $url = static::getUrl(['project_id' => $projectId]);
+            $this->js("Livewire.navigate('{$url}')");
+        } else {
+            Notification::make()
+                ->title('Project Not Found')
+                ->danger()
+                ->send();
+
+            $this->selectedProject = null;
+            $this->projectId = null;
         }
     }
 
     public function getTicketsProperty(): Collection
     {
-        $query = Ticket::query()
-            ->with(['status', 'project'])
+        if (!$this->projectId) {
+            return collect();
+        }
+    
+        return Ticket::select('id', 'name', 'due_date', 'start_date', 'ticket_status_id')
+            ->with(['status:id,name,color'])
+            ->where('project_id', $this->projectId)
             ->whereNotNull('due_date')
-            ->orderBy('due_date');
-
-        if ($this->projectId) {
-            $query->where('project_id', $this->projectId);
-        } else {
-            $projectIds = $this->projects->pluck('id')->toArray();
-            $query->whereIn('project_id', $projectIds);
-        }
-
-        return $query->get();
+            ->orderBy('due_date')
+            ->get();
     }
 
-    public function getMonthHeaders(): array
+    public function getGanttDataProperty(): array
     {
-        $tickets = $this->tickets;
-
-        if ($tickets->isEmpty()) {
-            $months = [];
-            $current = Carbon::now()->subMonths(3)->startOfMonth();
-            for ($i = 0; $i < 6; $i++) {
-                $months[] = $current->format('M Y');
-                $current->addMonth();
-            }
-
-            return $months;
+        if (!$this->selectedProject) {
+            return ['data' => [], 'links' => []];
         }
-
-        $earliestDate = null;
-        $latestDate = null;
-
-        foreach ($tickets as $ticket) {
-            if ($ticket->due_date) {
-                $createdAt = $ticket->created_at ?? Carbon::parse($ticket->due_date)->subDays(14);
-                $dueDate = Carbon::parse($ticket->due_date);
-
-                if ($earliestDate === null || $createdAt < $earliestDate) {
-                    $earliestDate = $createdAt;
+    
+        try {
+            $tickets = $this->tickets;
+            if ($tickets->isEmpty()) {
+                return ['data' => [], 'links' => []];
+            }
+    
+            $ganttTasks = [];
+            $now = Carbon::now();
+    
+            foreach ($tickets as $ticket) {
+                if (!$ticket->due_date) {
+                    continue;
                 }
-
-                if ($latestDate === null || $dueDate > $latestDate) {
-                    $latestDate = $dueDate;
-                }
-            }
-        }
-
-        if ($earliestDate === null || $latestDate === null) {
-            return ['Jan 2025', 'Feb 2025', 'Mar 2025', 'Apr 2025'];
-        }
-
-        $earliestDate = $earliestDate->startOfMonth();
-        $latestDate = $latestDate->endOfMonth();
-
-        $months = [];
-        $current = clone $earliestDate;
-
-        while ($current <= $latestDate) {
-            $months[] = $current->format('M Y');
-            $current->addMonth();
-        }
-
-        return $months;
-    }
-
-    public function getTimelineData(): array
-    {
-        $tickets = $this->tickets;
-
-        if ($tickets->isEmpty()) {
-            return [
-                'tasks' => [],
-            ];
-        }
-
-        $monthHeaders = $this->getMonthHeaders();
-        $monthRanges = $this->getMonthDateRanges($monthHeaders);
-
-        $tasks = [];
-        $now = Carbon::now();
-
-        foreach ($tickets as $index => $ticket) {
-            if (! $ticket->due_date) {
-                continue;
-            }
-
-            $startDate = $ticket->created_at ? Carbon::parse($ticket->created_at) : Carbon::parse($ticket->due_date)->subDays(14);
-            $endDate = Carbon::parse($ticket->due_date);
-
-            $hue = ($index * 137) % 360;
-            $color = "hsl({$hue}, 70%, 50%)";
-
-            $remainingDays = $now->diffInDays($endDate, false);
-
-            $barSpans = [];
-
-            foreach ($monthRanges as $monthIndex => $monthRange) {
-                $monthStart = $monthRange['start'];
-                $monthEnd = $monthRange['end'];
-                $daysInMonth = $monthStart->daysInMonth;
-
-                if ($startDate <= $monthEnd && $endDate >= $monthStart) {
-                    $startPosition = 0;
-                    if ($startDate > $monthStart) {
-                        $daysFromMonthStart = $monthStart->diffInDays($startDate);
-                        $startPosition = ($daysFromMonthStart / $daysInMonth) * 100;
+                
+                try {
+                    // Use start_date if available, otherwise fall back to 7 days before due_date
+                    $startDate = $ticket->start_date ? Carbon::parse($ticket->start_date) : Carbon::parse($ticket->due_date)->subDays(7);
+                    $endDate = Carbon::parse($ticket->due_date);
+                    
+                    if ($endDate->lte($startDate)) {
+                        $endDate = $startDate->copy()->addDays(1);
                     }
-
-                    $endPosition = 100;
-                    if ($endDate < $monthEnd) {
-                        $daysFromMonthStart = $monthStart->diffInDays($endDate);
-                        $endPosition = (($daysFromMonthStart + 1) / $daysInMonth) * 100;
-                    }
-
-                    $widthPercentage = $endPosition - $startPosition;
-
-                    $barSpans[$monthIndex] = [
-                        'start_position' => $startPosition,
-                        'width_percentage' => $widthPercentage,
+                    
+                    $progress = $this->getSimpleProgress($ticket->status->name ?? '') / 100;
+                    $isOverdue = $endDate->lt($now) && $progress < 1;
+                    
+                    $taskData = [
+                        'id' => (string) $ticket->id,
+                        'text' => $this->truncateName($ticket->name ?? 'Untitled Ticket'),
+                        'start_date' => $startDate->format('d-m-Y H:i'),
+                        'end_date' => $endDate->format('d-m-Y H:i'),
+                        'duration' => max(1, $startDate->diffInDays($endDate)),
+                        'progress' => max(0, min(1, $progress)),
+                        'type' => 'task',
+                        'readonly' => true,
+                        'color' => $isOverdue ? '#ef4444' : ($ticket->status->color ?? '#3b82f6'),
+                        'textColor' => '#ffffff',
+                        'status' => $ticket->status->name ?? 'Unknown',
+                        'is_overdue' => $isOverdue
                     ];
+                    
+                    $ganttTasks[] = $taskData;
+                    
+                } catch (Exception $e) {
+                    Log::error('Error processing ticket ' . $ticket->id . ': ' . $e->getMessage());
+                    continue;
                 }
             }
-
-            $status = strtolower($ticket->status->name ?? 'default');
-            $statusLabel = ucfirst($status);
-            $isOverdue = $endDate < $now && ! in_array($status, ['completed', 'done', 'closed', 'resolved']);
-
-            $remainingDaysText = '';
-            if ($remainingDays > 0) {
-                $remainingDaysText = "{$remainingDays} days left";
-            } elseif ($remainingDays === 0) {
-                $remainingDaysText = 'Due today';
-            } else {
-                $remainingDaysText = abs($remainingDays).' days overdue';
-            }
-
-            $tasks[] = [
-                'id' => $ticket->id,
-                'title' => $ticket->name,
-                'ticket_id' => $ticket->uuid,
-                'color' => $color,
-                'bar_spans' => $barSpans,
-                'start_date' => $startDate->format('M j'),
-                'end_date' => $endDate->format('M j'),
-                'remaining_days' => $remainingDays,
-                'remaining_days_text' => $remainingDaysText,
-                'status' => $status,
-                'status_label' => $statusLabel,
-                'is_overdue' => $isOverdue,
+            
+            return [
+                'data' => $ganttTasks,
+                'links' => []
             ];
+            
+        } catch (Exception $e) {
+            Log::error('Error generating gantt data: ' . $e->getMessage());
+            return ['data' => [], 'links' => []];
         }
-
-        usort($tasks, function ($a, $b) {
-            if ($a['is_overdue'] && ! $b['is_overdue']) {
-                return -1;
-            }
-            if (! $a['is_overdue'] && $b['is_overdue']) {
-                return 1;
-            }
-
-            return $a['remaining_days'] <=> $b['remaining_days'];
-        });
-
-        return [
-            'tasks' => $tasks,
-        ];
     }
 
-    private function getMonthDateRanges(array $monthHeaders): array
+    private function truncateName($name, $length = 50): string
     {
-        $ranges = [];
+        return strlen($name) > $length ? substr($name, 0, $length) . '...' : $name;
+    }
 
-        foreach ($monthHeaders as $index => $monthHeader) {
-            $date = Carbon::createFromFormat('M Y', $monthHeader);
-            $ranges[$index] = [
-                'start' => (clone $date)->startOfMonth(),
-                'end' => (clone $date)->endOfMonth(),
-            ];
+    private function getSimpleProgress($statusName): int
+    {
+        if (!$this->selectedProject || empty($statusName)) {
+            return 0;
         }
-
-        return $ranges;
+        
+        try {
+            $statuses = $this->selectedProject->ticketStatuses()
+                ->orderBy('sort_order')
+                ->get();
+            
+            if ($statuses->isEmpty()) {
+                return 0;
+            }
+            
+            $currentStatus = $statuses->firstWhere('name', $statusName);
+            
+            if (!$currentStatus) {
+                return 0;
+            }
+            
+            $totalStatuses = $statuses->count();
+            $currentPosition = $statuses->search(function ($status) use ($currentStatus) {
+                return $status->id === $currentStatus->id;
+            });
+            
+            if ($currentPosition === false) {
+                return 0;
+            }
+            
+            $progress = (($currentPosition + 1) / $totalStatuses) * 100;
+            
+            return (int) round(max(0, min(100, $progress)));
+        } catch (Exception $e) {
+            Log::error('Error calculating progress: ' . $e->getMessage());
+            return 0;
+        }
     }
 }

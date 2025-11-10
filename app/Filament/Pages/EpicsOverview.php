@@ -4,8 +4,6 @@ namespace App\Filament\Pages;
 
 use App\Models\Epic;
 use App\Models\Project;
-use Filament\Forms\Components\Select;
-use Filament\Forms\Form;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Illuminate\Support\Collection;
@@ -13,15 +11,19 @@ use Livewire\Attributes\On;
 
 class EpicsOverview extends Page
 {
-    protected static ?string $navigationIcon = 'heroicon-o-flag';
-
-    protected static string $view = 'filament.pages.epics-overview';
-
-    protected static ?string $navigationGroup = 'Project Management';
-
+    protected static string | \BackedEnum | null $navigationIcon = 'heroicon-o-flag';
+    protected string $view = 'filament.pages.epics-overview';
+    protected static string | \UnitEnum | null $navigationGroup = 'Project Management';
     protected static ?string $navigationLabel = 'Epics';
+    protected static ?string $title = 'Epics Overview';
+    protected static ?int $navigationSort = 7;
 
-    protected static ?int $navigationSort = 3;
+    public function getSubheading(): ?string
+    {
+        return 'Manage and track project epics with their associated tickets and progress';
+    }
+
+    protected static ?string $slug = 'epics-overview/{project_id?}';
 
     public Collection $epics;
 
@@ -31,12 +33,19 @@ class EpicsOverview extends Page
 
     public Collection $availableProjects;
 
-    public function mount(): void
+    public function mount($project_id = null): void
     {
         $this->loadAvailableProjects();
 
-        if ($this->availableProjects->isNotEmpty() && ! $this->selectedProjectId) {
-            $this->selectedProjectId = $this->availableProjects->first()->id;
+        if ($project_id && $this->availableProjects->contains('id', $project_id)) {
+            $this->selectedProjectId = (int) $project_id;
+        } elseif ($project_id && !$this->availableProjects->contains('id', $project_id)) {
+            Notification::make()
+                ->title('Project Not Found')
+                ->body('The selected project was not found or you do not have access to it.')
+                ->danger()
+                ->send();
+            $this->redirect(static::getUrl());
         }
 
         $this->loadEpics();
@@ -59,7 +68,7 @@ class EpicsOverview extends Page
         $query = Epic::with([
             'project',
             'tickets' => function ($query) {
-                $query->with(['status', 'assignee']);
+                $query->with(['status', 'assignees', 'creator']);
             },
         ])
             ->orderBy('start_date', 'asc');
@@ -69,6 +78,22 @@ class EpicsOverview extends Page
         }
 
         $this->epics = $query->get();
+    }
+
+    public function updatedSelectedProjectId($value): void
+    {
+        $this->selectedProjectId = $value ? (int) $value : null;
+
+        if ($this->selectedProjectId) {
+            $url = static::getUrl(['project_id' => $this->selectedProjectId]);
+            $this->js("Livewire.navigate('{$url}')");
+        } else {
+            $url = static::getUrl();
+            $this->js("Livewire.navigate('{$url}')");
+        }
+
+        $this->loadEpics();
+        $this->expandedEpics = $this->epics->pluck('id')->toArray();
     }
 
     public function toggleEpic(int $epicId): void
@@ -85,18 +110,55 @@ class EpicsOverview extends Page
         return in_array($epicId, $this->expandedEpics);
     }
 
-    public function form(Form $form): Form
+    public function getEpicStats(Epic $epic): array
     {
-        return $form
-            ->schema([
-                Select::make('selectedProjectId')
-                    ->label('Project')
-                    ->options($this->availableProjects->pluck('name', 'id'))
-                    ->live()
-                    ->afterStateUpdated(function () {
-                        $this->loadEpics();
-                    }),
-            ]);
+        $tickets = $epic->tickets;
+        $totalTickets = $tickets->count();
+        
+        if ($totalTickets === 0) {
+            return [
+                'total' => 0,
+                'completed' => 0,
+                'in_progress' => 0,
+                'todo' => 0,
+                'progress_percentage' => 0,
+            ];
+        }
+
+        $completed = $tickets->filter(function ($ticket) {
+            return in_array($ticket->status?->name, ['Done', 'Completed', 'Closed']);
+        })->count();
+
+        $inProgress = $tickets->filter(function ($ticket) {
+            return in_array($ticket->status?->name, ['In Progress', 'Review']);
+        })->count();
+
+        $todo = $tickets->filter(function ($ticket) {
+            return in_array($ticket->status?->name, ['To Do', 'Open', 'New']);
+        })->count();
+
+        return [
+            'total' => $totalTickets,
+            'completed' => $completed,
+            'in_progress' => $inProgress,
+            'todo' => $todo,
+            'progress_percentage' => $totalTickets > 0 ? round(($completed / $totalTickets) * 100) : 0,
+        ];
+    }
+
+    public function getTicketAssigneesDisplay($ticket): string
+    {
+        if ($ticket->assignees->isEmpty()) {
+            return 'Unassigned';
+        }
+
+        $names = $ticket->assignees->pluck('name')->toArray();
+        
+        if (count($names) <= 2) {
+            return implode(', ', $names);
+        }
+
+        return $names[0] . ', ' . $names[1] . ' +' . (count($names) - 2) . ' more';
     }
 
     #[On('epic-created')]
